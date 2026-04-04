@@ -1,471 +1,341 @@
-const {
-  Client, GatewayIntentBits, EmbedBuilder,
-  REST, Routes, SlashCommandBuilder, PermissionFlagsBits,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  StringSelectMenuBuilder,
-} = require('discord.js');
-const fs   = require('fs');
-const path = require('path');
+require('dotenv').config();
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ChannelSelectMenuBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits, REST, Routes } = require('discord.js');
+const mongoose = require('mongoose');
+const winston  = require('winston');
 
-// ── Config ────────────────────────────────────────────────────────────────────
-const CONFIG_PATH = path.join(__dirname, 'config.json');
-function loadConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); }
-  catch { return { channels: {} }; }
-}
-function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
-}
-
-// ── Client ────────────────────────────────────────────────────────────────────
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp({ format: 'HH:mm:ss' }),
+    winston.format.colorize(),
+    winston.format.printf(({ timestamp, level, message }) => `[${timestamp}] ${level}: ${message}`)
+  ),
+  transports: [new winston.transports.Console()],
 });
 
-const TYPES = ['pfp', 'gif', 'banner', 'female', 'male', 'anime'];
-const TYPE_META = {
-  pfp:    { label: 'Random PFP',    emoji: '🖼️', desc: 'Foto profilo casuali dei membri' },
-  gif:    { label: 'Random GIF',    emoji: '🎞️', desc: 'Avatar animati dei membri'       },
-  banner: { label: 'Random Banner', emoji: '🏞️', desc: 'Banner dei membri'               },
-  female: { label: 'Female Icons',  emoji: '👩', desc: 'PFP femminili estetiche'         },
-  male:   { label: 'Male Icons',    emoji: '👨', desc: 'PFP maschili estetici'           },
-  anime:  { label: 'Anime Icons',   emoji: '🎌', desc: 'PFP anime estetici'              },
+const imageSchema = new mongoose.Schema({
+  url:       { type: String, required: true, unique: true },
+  category:  { type: String, required: true, enum: ['girl','boy','anime_female','anime_male'] },
+  used:      { type: Boolean, default: false },
+  fetchedAt: { type: Date, default: Date.now },
+  sentAt:    { type: Date, default: null },
+  failCount: { type: Number, default: 0 },
+}, { timestamps: true });
+imageSchema.index({ used: 1, category: 1, fetchedAt: 1 });
+const Image = mongoose.model('Image', imageSchema);
+
+const channelConfigSchema = new mongoose.Schema({
+  guildId:   { type: String, required: true },
+  category:  { type: String, required: true, enum: ['girl','boy','anime_female','anime_male'] },
+  channelId: { type: String, required: true },
+  setBy:     { type: String, default: null },
+}, { timestamps: true });
+channelConfigSchema.index({ guildId: 1, category: 1 }, { unique: true });
+const ChannelConfig = mongoose.model('ChannelConfig', channelConfigSchema);
+
+async function connectDB() {
+  for (let i = 0; i < 10; i++) {
+    try { await mongoose.connect(process.env.MONGODB_URI); logger.info('✅ MongoDB connected'); return; }
+    catch (err) { logger.warn(`MongoDB retry ${i+1}/10...`); await new Promise(r => setTimeout(r, 5000)); }
+  }
+  logger.error('❌ MongoDB failed'); process.exit(1);
+}
+
+const SEARCH_QUERIES = [
+  { query: 'girl pfp',       category: 'girl'         },
+  { query: 'boy pfp',        category: 'boy'          },
+  { query: 'anime girl pfp', category: 'anime_female' },
+  { query: 'anime boy pfp',  category: 'anime_male'   },
+];
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+];
+
+const bookmarks = {};
+for (const { query } of SEARCH_QUERIES) bookmarks[query] = [];
+const randomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const sleep    = ms => new Promise(r => setTimeout(r, ms));
+
+function extractImageUrl(pin) {
+  try {
+    const images = pin.images;
+    if (!images) return null;
+    for (const size of ['orig','736x','474x','236x']) {
+      if (images[size]?.url && /\.(jpg|jpeg|png|webp)/i.test(images[size].url)) return images[size].url;
+    }
+    return Object.values(images).find(img => img?.url)?.url ?? null;
+  } catch { return null; }
+}
+
+async function fetchViaAPI(query, pageSize = 50) {
+  const currentBookmark = bookmarks[query].at(-1) ?? null;
+  const options = { isPrefetch: false, query, scope: 'pins', no_fetch_context_on_resource: false, page_size: pageSize,
+    ...(currentBookmark && currentBookmark !== '-end-' ? { bookmarks: [currentBookmark] } : {}),
+  };
+  const requestUrl = new URL('https://www.pinterest.com/resource/BaseSearchResource/get/');
+  requestUrl.searchParams.set('source_url', `/search/pins/?q=${encodeURIComponent(query)}&rs=typed`);
+  requestUrl.searchParams.set('data', JSON.stringify({ options, context: {} }));
+  requestUrl.searchParams.set('_', Date.now().toString());
+  const headers = {
+    'User-Agent': randomUA(), 'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'Accept-Language': 'en-US,en;q=0.9', 'X-Requested-With': 'XMLHttpRequest',
+    'X-Pinterest-AppState': 'active', 'Referer': `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(query)}`,
+  };
+  if (process.env.PINTEREST_SESSION) headers['Cookie'] = `_pinterest_sess=${process.env.PINTEREST_SESSION}`;
+  const res = await fetch(requestUrl.toString(), { headers, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`Pinterest API ${res.status}`);
+  const json = await res.json();
+  const rr = json?.resource_response;
+  if (!rr || rr.status !== 'success') throw new Error(`Pinterest: ${rr?.message ?? 'unknown'}`);
+  return { urls: (rr.data?.results ?? []).map(extractImageUrl).filter(Boolean), nextBookmark: rr.bookmark ?? null };
+}
+
+async function fetchAndSave({ query, category }) {
+  let urls = [], nextBookmark = null;
+  try { ({ urls, nextBookmark } = await fetchViaAPI(query)); }
+  catch (err) { logger.warn(`[Fetcher] Failed "${query}": ${err.message}`); return 0; }
+  if (nextBookmark && nextBookmark !== '-end-') {
+    bookmarks[query].push(nextBookmark);
+    if (bookmarks[query].length > 100) bookmarks[query] = bookmarks[query].slice(-100);
+  } else if (nextBookmark === '-end-') { bookmarks[query] = []; }
+  if (!urls.length) return 0;
+  let count = 0;
+  for (let i = 0; i < urls.length; i += 20) {
+    const ops = urls.slice(i, i+20).map(url => ({
+      updateOne: { filter: { url }, update: { $setOnInsert: { url, category, used: false, fetchedAt: new Date() } }, upsert: true }
+    }));
+    try { const r = await Image.bulkWrite(ops, { ordered: false }); count += r.upsertedCount; }
+    catch (e) { if (e.code !== 11000) logger.error('[Fetcher] bulkWrite: ' + e.message); }
+  }
+  return count;
+}
+
+async function runFetchCycle() {
+  logger.info('[Fetcher] 🔍 Fetching...');
+  let total = 0;
+  for (const q of SEARCH_QUERIES) {
+    await sleep(Math.floor(Math.random()*3000)+2000);
+    const n = await fetchAndSave(q);
+    total += n;
+    logger.info(`[Fetcher] "${q.query}" → +${n}`);
+  }
+  const queue = await Image.countDocuments({ used: false });
+  logger.info(`[Fetcher] ✅ Done. +${total} new. Queue: ${queue}`);
+}
+
+async function emergencyFetch() { logger.warn('[Fetcher] ⚠️ Emergency!'); await runFetchCycle(); }
+function startFetcher() {
+  const interval = parseInt(process.env.FETCH_INTERVAL_MS ?? '45000', 10);
+  runFetchCycle();
+  setInterval(() => runFetchCycle().catch(e => logger.error(e.message)), interval);
+}
+
+const CATEGORY_META = {
+  girl:         { emoji: '👧', color: 0xFF85A1, label: 'Girl PFP'         },
+  boy:          { emoji: '👦', color: 0x5B9BD5, label: 'Boy PFP'          },
+  anime_female: { emoji: '🌸', color: 0xFF6B9D, label: 'Anime Female PFP' },
+  anime_male:   { emoji: '⚔️', color: 0x7B68EE, label: 'Anime Male PFP'   },
 };
 
-// ── Subreddit per tipo ────────────────────────────────────────────────────────
-const SUBREDDITS = {
-  female: [
-    'PFP',
-    'egirls',
-    'DarkAestheticPFP',
-    'alternativegirls',
-    'GothStyle',
-  ],
-  male: [
-    'PFP',
-    'DarkAestheticPFP',
-    'streetwear',
-    'malefashion',
-    'Faces',
-  ],
-};
+async function isReachable(url) {
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    return res.ok && (res.headers.get('content-type') ?? '').startsWith('image/');
+  } catch { return false; }
+}
 
-// ── Slash Commands ────────────────────────────────────────────────────────────
-const slashCommands = [
-  new SlashCommandBuilder()
-    .setName('setchannel')
-    .setDescription('Imposta il canale per un tipo di contenuto')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(o =>
-      o.setName('tipo').setDescription('Tipo di contenuto').setRequired(true)
-        .addChoices(...TYPES.map(t => ({ name: `${TYPE_META[t].emoji} ${TYPE_META[t].label}`, value: t })))
-    )
-    .addChannelOption(o =>
-      o.setName('canale').setDescription('Canale dove inviare i contenuti').setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName('channels')
-    .setDescription('Visualizza e gestisci i canali configurati')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-].map(c => c.toJSON());
+async function sendForCategory(client, category, channelId) {
+  const channel = client.channels.cache.get(channelId);
+  if (!channel) return;
+  const queue = await Image.countDocuments({ category, used: false });
+  if (queue === 0) { emergencyFetch(); return; }
+  if (queue < parseInt(process.env.LOW_QUEUE_THRESHOLD ?? '20', 10)) emergencyFetch();
+  const image = await Image.findOneAndUpdate(
+    { category, used: false, failCount: { $lt: 3 } },
+    { $set: { used: true, sentAt: new Date() } },
+    { sort: { fetchedAt: 1 }, new: true }
+  );
+  if (!image) return;
+  if (!await isReachable(image.url)) { await Image.updateOne({ _id: image._id }, { $inc: { failCount: 1 } }); return; }
+  const meta = CATEGORY_META[category];
+  const embed = new EmbedBuilder().setColor(meta.color).setTitle(`${meta.emoji}  ${meta.label}`).setImage(image.url).setFooter({ text: `📦 ${queue-1} in queue` }).setTimestamp();
+  try { await channel.send({ embeds: [embed] }); }
+  catch (err) { logger.error(`[Sender] ${category}: ${err.message}`); }
+}
 
-const pendingRemovals = new Map();
+async function sendTick(client) {
+  const configs = await ChannelConfig.find({});
+  if (!configs.length) { logger.warn('[Sender] No channels configured! Use /setchannel'); return; }
+  for (const cfg of configs) {
+    try { await sendForCategory(client, cfg.category, cfg.channelId); }
+    catch (err) { logger.error(`[Sender] ${cfg.category}: ${err.message}`); }
+  }
+}
 
-// ── UI Helpers ────────────────────────────────────────────────────────────────
-function buildChannelsEmbed(cfg) {
+async function loadGuildConfig(guildId) {
+  const docs = await ChannelConfig.find({ guildId });
+  return Object.fromEntries(docs.map(d => [d.category, d.channelId]));
+}
+
+async function buildOverviewEmbed(guild, config) {
+  const lines = await Promise.all(
+    Object.entries(CATEGORY_META).map(async ([key, meta]) => {
+      const ch = config[key];
+      const q  = await Image.countDocuments({ category: key, used: false });
+      return `${meta.emoji} **${meta.label}**\n┗ ${ch ? `<#${ch}>` : '⚠️ *Not set*'} · 📦 ${q} in queue`;
+    })
+  );
+  const allSet = Object.keys(CATEGORY_META).every(k => config[k]);
   return new EmbedBuilder()
-    .setTitle('⚙️  Configurazione Canali')
-    .setColor(0x5865f2)
-    .addFields(
-      { name: '━━━━━  🧩 INTERACT  ━━━━━', value: '\u200b' },
-      ...['pfp', 'gif', 'banner'].map(t => ({
-        name: `${TYPE_META[t].emoji} ${TYPE_META[t].label}`,
-        value: cfg.channels[t] ? `<#${cfg.channels[t]}>` : '`non impostato`',
-        inline: true,
-      })),
-      { name: '━━━━━  🎸 ICONS  ━━━━━', value: '\u200b' },
-      ...['female', 'male', 'anime'].map(t => ({
-        name: `${TYPE_META[t].emoji} ${TYPE_META[t].label}`,
-        value: cfg.channels[t] ? `<#${cfg.channels[t]}>` : '`non impostato`',
-        inline: true,
-      })),
-    )
-    .setFooter({ text: 'Usa il menu qui sotto per rimuovere • /setchannel per impostare' })
+    .setTitle('📡  PFP Channel Routing')
+    .setDescription(allSet ? '✅ All categories configured!' : '⚠️ Some categories have no channel.')
+    .addFields({ name: '╔═══ Assignments ═══╗', value: lines.join('\n\n') })
+    .setColor(allSet ? 0x57F287 : 0xFEE75C)
+    .setFooter({ text: `${guild.name} · /setchannel to edit` })
     .setTimestamp();
 }
 
-function buildRemoveMenu(cfg) {
-  const configured = TYPES.filter(t => cfg.channels[t]);
-  if (!configured.length) return null;
+function buildCategoryMenu(id) {
   return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId('remove_select')
-      .setPlaceholder('🗑️  Seleziona un canale da rimuovere...')
-      .addOptions(configured.map(t => ({
-        label: TYPE_META[t].label, description: TYPE_META[t].desc, value: t, emoji: TYPE_META[t].emoji,
-      })))
+    new StringSelectMenuBuilder().setCustomId(`sc_cat_${id}`).setPlaceholder('🎯 Choose a category...')
+      .addOptions(Object.entries(CATEGORY_META).map(([value, m]) => ({ label: m.label, value, emoji: m.emoji })))
   );
 }
 
-function buildConfirmRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('confirm_remove').setLabel('Rimuovi').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('cancel_remove').setLabel('Annulla').setEmoji('↩️').setStyle(ButtonStyle.Secondary),
-  );
+async function handleSetChannel(interaction) {
+  const embed = new EmbedBuilder().setTitle('🎨  Set Channel — Step 1 of 2')
+    .setDescription('> Select which **category** to configure.')
+    .addFields(...Object.entries(CATEGORY_META).map(([,m]) => ({ name: `${m.emoji} ${m.label}`, value: '\u200b', inline: true })))
+    .setColor(0x5865F2).setFooter({ text: 'Step 1 of 2 — Choose a category' });
+  await interaction.reply({ embeds: [embed], components: [buildCategoryMenu(interaction.id)], ephemeral: true });
 }
 
-// ── Rate-limit-safe sender ────────────────────────────────────────────────────
-const channelPaused = new Map();
-async function safeSend(channel, payload, attempt = 0) {
-  if (Date.now() < (channelPaused.get(channel.id) ?? 0)) return;
-  try {
-    await channel.send(payload);
-  } catch (err) {
-    if (err.status === 429) {
-      const pauseMs = ((err.retryAfter ?? 5) + 1) * 1000;
-      console.warn(`[RateLimit] #${channel.name} – pausa ${pauseMs}ms`);
-      channelPaused.set(channel.id, Date.now() + pauseMs);
-    } else if (err.status >= 500 && attempt < 3) {
-      await sleep(2000 * (attempt + 1));
-      return safeSend(channel, payload, attempt + 1);
-    } else if (err.code === 50013) {
-      console.warn(`[Permessi] Mancano permessi per #${channel.name}`);
-    } else {
-      console.error(`[Errore send] #${channel.name}:`, err.message);
-    }
+async function handleChannels(interaction) {
+  const config = await loadGuildConfig(interaction.guildId);
+  await interaction.reply({ embeds: [await buildOverviewEmbed(interaction.guild, config)], ephemeral: true });
+}
+
+async function handleComponent(interaction) {
+  const { customId, guildId, guild, user } = interaction;
+
+  if (customId.startsWith('sc_cat_')) {
+    const cat  = interaction.values[0];
+    const id   = customId.replace('sc_cat_', '');
+    const cfg  = await loadGuildConfig(guildId);
+    const meta = CATEGORY_META[cat];
+    const embed = new EmbedBuilder().setTitle(`${meta.emoji}  Set Channel — Step 2 of 2`)
+      .setDescription(`> **${meta.label}** selected.\n> Now pick the channel.`)
+      .addFields({ name: 'Currently', value: cfg[cat] ? `<#${cfg[cat]}>` : '⚠️ None', inline: true })
+      .setColor(meta.color).setFooter({ text: 'Step 2 of 2 — Choose a channel' });
+    const chMenu = new ActionRowBuilder().addComponents(
+      new ChannelSelectMenuBuilder().setCustomId(`sc_ch_${cat}_${id}`).setPlaceholder('📺 Choose a channel...').addChannelTypes(ChannelType.GuildText)
+    );
+    const back = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`sc_back_${id}`).setLabel('← Back').setStyle(ButtonStyle.Secondary)
+    );
+    await interaction.update({ embeds: [embed], components: [chMenu, back] });
+    return;
+  }
+
+  if (customId.startsWith('sc_ch_')) {
+    const parts = customId.replace('sc_ch_', '').split('_');
+    const cat   = parts.slice(0, -1).join('_');
+    const channelId = interaction.values[0];
+    await ChannelConfig.findOneAndUpdate({ guildId, category: cat }, { channelId, setBy: user.id }, { upsert: true, new: true });
+    const meta = CATEGORY_META[cat];
+    const successEmbed = new EmbedBuilder().setTitle('✅  Channel Set!').setDescription(`**${meta.emoji} ${meta.label}** → <#${channelId}>`).setColor(meta.color).setTimestamp();
+    const overviewEmbed = await buildOverviewEmbed(guild, await loadGuildConfig(guildId));
+    const btns = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`sc_restart_${interaction.id}`).setLabel('Configure another').setEmoji('🔁').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`sc_done_${interaction.id}`).setLabel('Done').setEmoji('✅').setStyle(ButtonStyle.Secondary)
+    );
+    await interaction.update({ embeds: [successEmbed, overviewEmbed], components: [btns] });
+    return;
+  }
+
+  if (customId.startsWith('sc_back_')) {
+    const id = customId.replace('sc_back_', '');
+    const embed = new EmbedBuilder().setTitle('🎨  Set Channel — Step 1 of 2').setDescription('> Select which **category** to configure.').setColor(0x5865F2);
+    await interaction.update({ embeds: [embed], components: [buildCategoryMenu(id)] });
+    return;
+  }
+
+  if (customId.startsWith('sc_restart_')) {
+    const embed = new EmbedBuilder().setTitle('🎨  Set Channel — Step 1 of 2').setDescription('> Select which **category** to configure.').setColor(0x5865F2);
+    await interaction.update({ embeds: [embed], components: [buildCategoryMenu(interaction.id)] });
+    return;
+  }
+
+  if (customId.startsWith('sc_done_')) {
+    const config = await loadGuildConfig(guildId);
+    await interaction.update({ embeds: [await buildOverviewEmbed(guild, config)], components: [] });
+    return;
   }
 }
 
-// ── Utils ─────────────────────────────────────────────────────────────────────
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-function shuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-function ts() {
-  return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-}
-function makeEmbed(url, footer) {
-  const e = new EmbedBuilder().setImage(url).setColor(0x2b2d31);
-  if (footer) e.setFooter({ text: footer });
-  return e;
-}
-function getChannel(id) {
-  return id ? (client.channels.cache.get(id) ?? null) : null;
-}
+async function main() {
+  logger.info('🤖 Discord PFP Bot starting...');
+  const required = ['DISCORD_TOKEN','DISCORD_CLIENT_ID','MONGODB_URI'];
+  const missing  = required.filter(k => !process.env[k]);
+  if (missing.length) { logger.error('Missing env: ' + missing.join(', ')); process.exit(1); }
 
-// ── Member Pool ───────────────────────────────────────────────────────────────
-class MemberPool {
-  constructor() { this.queues = { pfp: [], gif: [], banner: [] }; this.busy = false; }
-  next(type) {
-    const q = this.queues[type];
-    if (!q.length) return null;
-    const item = q.shift(); q.push(item); return item;
-  }
-  async refresh(guild) {
-    if (this.busy) return;
-    this.busy = true;
+  await connectDB();
+  startFetcher();
+
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+  client.once('ready', async () => {
+    logger.info(`✅ Logged in as ${client.user.tag}`);
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
-      const all = [...(await guild.members.fetch()).values()].filter(m => !m.user.bot);
-      this.queues.pfp = shuffle(all).map(m => ({
-        id: m.user.id,
-        url: m.user.displayAvatarURL({ size: 1024, extension: 'png', forceStatic: true }),
-      }));
-      const animated = all.filter(m => m.user.avatar?.startsWith('a_'));
-      const gifSrc   = animated.length >= 3 ? animated : all;
-      this.queues.gif = shuffle(gifSrc).map(m => ({
-        id: m.user.id,
-        url: m.user.displayAvatarURL({ size: 1024, extension: animated.length >= 3 ? 'gif' : 'png' }),
-      }));
-      const banners = [];
-      for (const m of shuffle(all)) {
-        try {
-          const u = await client.users.fetch(m.user.id, { force: true });
-          if (u.banner) banners.push({ id: u.id, url: u.bannerURL({ size: 1024 }) });
-        } catch { /* skip */ }
-      }
-      this.queues.banner = banners;
-      console.log(`[Pool] pfp:${this.queues.pfp.length} | gif:${this.queues.gif.length} | banner:${this.queues.banner.length}`);
-    } catch (err) {
-      console.error('[Pool:refresh]', err.message);
-    } finally { this.busy = false; }
-  }
-}
+      await rest.put(Routes.applicationCommands(process.env.DISCORD_CLIENT_ID), { body: [
+        { name: 'setchannel', description: '🎨 Configure which channel each PFP category is sent to', default_member_permissions: String(PermissionFlagsBits.ManageChannels) },
+        { name: 'channels',   description: '📡 View current PFP channel routing' },
+      ]});
+      logger.info('[Commands] ✅ Registered');
+    } catch (err) { logger.error('[Commands] Failed: ' + err.message); }
 
-// ── Icon Pool ─────────────────────────────────────────────────────────────────
-class IconPool {
-  constructor() {
-    this.queues  = { female: [], male: [], anime: [] };
-    this.loading = { female: false, male: false, anime: false };
-  }
-
-  next(type) {
-    const q = this.queues[type];
-    if (!q.length) return null;
-    const url = q.shift();
-    q.push(url);
-    return url;
-  }
-
-  async preload(type) {
-    if (this.loading[type]) return;
-    this.loading[type] = true;
-    try {
-      const urls = await this._fetchBatch(type);
-      if (urls.length > 0) {
-        this.queues[type] = shuffle(urls);
-        console.log(`[IconPool:${type}] ✅ Caricati ${urls.length} immagini`);
-      } else {
-        console.warn(`[IconPool:${type}] ⚠️ Nessuna immagine caricata`);
-      }
-    } catch (err) {
-      console.error(`[IconPool:${type}] Errore:`, err.message);
-    } finally { this.loading[type] = false; }
-  }
-
-  async _fetchBatch(type) {
-    if (type === 'anime') return this._fetchAnime();
-    return this._fetchReddit(type);
-  }
-
-  async _fetchReddit(type) {
-    const subs    = SUBREDDITS[type];
-    const allUrls = [];
-
-    for (const sub of subs) {
-      try {
-        // Alterna tra top/hot per varietà
-        const sort = ['top', 'hot'][Math.floor(Math.random() * 2)];
-        const time = ['month', 'week', 'all'][Math.floor(Math.random() * 3)];
-        const url  = `https://www.reddit.com/r/${sub}/${sort}.json?limit=100&t=${time}`;
-
-        const res = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; pfp-bot/2.0)',
-            'Accept': 'application/json',
-          },
-        });
-
-        if (!res.ok) {
-          console.warn(`[Reddit] r/${sub} → HTTP ${res.status}`);
-          continue;
-        }
-
-        const j = await res.json();
-        const posts = j?.data?.children ?? [];
-
-        const imgs = posts
-          .map(p => p.data)
-          .filter(d =>
-            d.post_hint === 'image' &&
-            !d.over_18 &&
-            (d.url?.endsWith('.jpg') || d.url?.endsWith('.jpeg') || d.url?.endsWith('.png'))
-          )
-          .map(d => d.url);
-
-        allUrls.push(...imgs);
-        console.log(`[Reddit] r/${sub} → ${imgs.length} immagini`);
-        await sleep(500); // gentile verso Reddit
-      } catch (err) {
-        console.error(`[Reddit] r/${sub}:`, err.message);
-      }
-    }
-
-    return [...new Set(allUrls)];
-  }
-
-  async _fetchAnime() {
-    const [females, males] = await Promise.all([
-      this._fetchWaifuIm(),
-      this._fetchNekos(),
-    ]);
-    return shuffle([...females, ...males]);
-  }
-
-  async _fetchWaifuIm() {
-    const tags = ['waifu', 'maid', 'uniform'];
-    const urls = [];
-    for (const tag of tags) {
-      try {
-        const res = await fetch(
-          `https://api.waifu.im/search/?included_tags=${tag}&height=%3E%3D500&limit=30`,
-          { headers: { 'User-Agent': 'pfp-bot/2.0' } }
-        );
-        const j = await res.json();
-        if (j.images) urls.push(...j.images.map(i => i.url));
-      } catch { /* skip */ }
-    }
-    return urls;
-  }
-
-  async _fetchNekos() {
-    const endpoints = ['husbando', 'shinobu'];
-    const urls = [];
-    for (const ep of endpoints) {
-      try {
-        const res = await fetch(
-          `https://nekos.best/api/v2/${ep}?amount=20`,
-          { headers: { 'User-Agent': 'pfp-bot/2.0' } }
-        );
-        const j = await res.json();
-        if (j.results) urls.push(...j.results.map(r => r.url));
-      } catch { /* skip */ }
-    }
-    return urls;
-  }
-}
-
-// ── Tasks ─────────────────────────────────────────────────────────────────────
-const memberPool = new MemberPool();
-const iconPool   = new IconPool();
-
-function startTasks(guild) {
-  setInterval(async () => {
-    const ch = getChannel(loadConfig().channels.pfp);
-    if (!ch) return;
-    const item = memberPool.next('pfp');
-    if (!item) return;
-    await safeSend(ch, { embeds: [makeEmbed(item.url, `User ID: ${item.id} | Today at ${ts()}`)] });
-  }, 4000);
-
-  setInterval(async () => {
-    const ch = getChannel(loadConfig().channels.gif);
-    if (!ch) return;
-    const item = memberPool.next('gif');
-    if (!item) return;
-    await safeSend(ch, { embeds: [makeEmbed(item.url, `User ID: ${item.id} | Today at ${ts()}`)] });
-  }, 8000);
-
-  setInterval(async () => {
-    const ch = getChannel(loadConfig().channels.banner);
-    if (!ch) return;
-    const item = memberPool.next('banner');
-    if (!item) return;
-    await safeSend(ch, { embeds: [makeEmbed(item.url, `User ID: ${item.id} | Today at ${ts()}`)] });
-  }, 12000);
-
-  for (const type of ['female', 'male', 'anime']) {
+    let sending = false;
     setInterval(async () => {
-      const ch = getChannel(loadConfig().channels[type]);
-      if (!ch) return;
-      if (iconPool.queues[type].length < 10) {
-        iconPool.preload(type).catch(console.error);
+      if (sending) return;
+      sending = true;
+      try { await sendTick(client); }
+      catch (err) { logger.error('[Sender] ' + err.message); }
+      finally { sending = false; }
+    }, parseInt(process.env.SEND_INTERVAL_MS ?? '3000', 10));
+
+    logger.info('✅ All systems running! Use /setchannel to configure.');
+  });
+
+  client.on('interactionCreate', async interaction => {
+    try {
+      if (interaction.isChatInputCommand()) {
+        if (interaction.commandName === 'setchannel') return await handleSetChannel(interaction);
+        if (interaction.commandName === 'channels')   return await handleChannels(interaction);
       }
-      const url = iconPool.next(type);
-      if (!url) return;
-      await safeSend(ch, { embeds: [makeEmbed(url)] });
-    }, 3000);
-  }
-
-  memberPool.refresh(guild);
-  setInterval(() => memberPool.refresh(guild), 10 * 60 * 1000);
-
-  // Refresh batch icon ogni 2 ore
-  setInterval(async () => {
-    for (const type of ['female', 'male', 'anime']) {
-      iconPool.queues[type] = [];
-      iconPool.preload(type).catch(console.error);
+      if ((interaction.isStringSelectMenu() || interaction.isChannelSelectMenu() || interaction.isButton()) && interaction.customId.startsWith('sc_')) {
+        return await handleComponent(interaction);
+      }
+    } catch (err) {
+      logger.error('[Interaction] ' + err.message);
+      try {
+        const msg = { content: '❌ Error. Try again.', ephemeral: true };
+        if (interaction.replied || interaction.deferred) await interaction.followUp(msg);
+        else await interaction.reply(msg);
+      } catch {}
     }
-  }, 2 * 60 * 60 * 1000);
+  });
+
+  client.on('error', err => logger.error('Discord error: ' + err.message));
+  process.on('SIGTERM', () => { logger.info('Shutting down...'); process.exit(0); });
+  process.on('SIGINT',  () => { logger.info('Shutting down...'); process.exit(0); });
+  process.on('uncaughtException',  err => logger.error('Uncaught: '  + err.message));
+  process.on('unhandledRejection', r   => logger.error('Unhandled: ' + String(r)));
+
+  await client.login(process.env.DISCORD_TOKEN);
 }
 
-// ── Ready ─────────────────────────────────────────────────────────────────────
-client.once('ready', async () => {
-  console.log(`✅ Online come ${client.user.tag}`);
-  const rest    = new REST({ version: '10' }).setToken(process.env.TOKEN);
-  const guildId = process.env.GUILD_ID;
-  try {
-    await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: slashCommands });
-    console.log('✅ Comandi slash registrati');
-  } catch (err) { console.error('[Comandi]', err.message); }
-
-  const guild = await client.guilds.fetch(guildId);
-
-  console.log('[IconPool] Precaricamento immagini...');
-  await Promise.all(['female', 'male', 'anime'].map(t => iconPool.preload(t)));
-  console.log('[IconPool] ✅ Precaricamento completato');
-
-  startTasks(guild);
-});
-
-// ── Interaction handler ───────────────────────────────────────────────────────
-client.on('interactionCreate', async interaction => {
-  if (interaction.isChatInputCommand() && interaction.commandName === 'setchannel') {
-    const tipo   = interaction.options.getString('tipo');
-    const canale = interaction.options.getChannel('canale');
-    const cfg    = loadConfig();
-    const prev   = cfg.channels[tipo];
-    cfg.channels[tipo] = canale.id;
-    saveConfig(cfg);
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('✅  Canale aggiornato')
-        .addFields(
-          { name: 'Tipo',   value: `${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}`, inline: true },
-          { name: 'Canale', value: `<#${canale.id}>`, inline: true },
-        )
-        .setFooter({ text: prev ? `Sostituisce: <#${prev}>` : 'Nessun canale precedente' })
-        .setTimestamp()],
-      ephemeral: true,
-    });
-  }
-
-  if (interaction.isChatInputCommand() && interaction.commandName === 'channels') {
-    const cfg       = loadConfig();
-    const removeRow = buildRemoveMenu(cfg);
-    return interaction.reply({
-      embeds: [buildChannelsEmbed(cfg)],
-      components: removeRow ? [removeRow] : [],
-      ephemeral: true,
-    });
-  }
-
-  if (interaction.isStringSelectMenu() && interaction.customId === 'remove_select') {
-    const tipo = interaction.values[0];
-    pendingRemovals.set(interaction.message.id, tipo);
-    return interaction.update({
-      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('⚠️  Conferma rimozione')
-        .setDescription(`Stai per rimuovere il canale per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}**.\n\nSei sicuro?`)],
-      components: [buildConfirmRow()],
-    });
-  }
-
-  if (interaction.isButton() && interaction.customId === 'confirm_remove') {
-    const tipo = pendingRemovals.get(interaction.message.id);
-    if (!tipo) return interaction.update({ content: '❌ Sessione scaduta.', embeds: [], components: [] });
-    const cfg = loadConfig();
-    delete cfg.channels[tipo];
-    saveConfig(cfg);
-    pendingRemovals.delete(interaction.message.id);
-    const newCfg    = loadConfig();
-    const removeRow = buildRemoveMenu(newCfg);
-    return interaction.update({
-      embeds: [
-        new EmbedBuilder().setColor(0x57f287).setTitle('🗑️  Rimosso con successo')
-          .setDescription(`Il canale per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}** è stato rimosso.`),
-        buildChannelsEmbed(newCfg),
-      ],
-      components: removeRow ? [removeRow] : [],
-    });
-  }
-
-  if (interaction.isButton() && interaction.customId === 'cancel_remove') {
-    pendingRemovals.delete(interaction.message.id);
-    const cfg       = loadConfig();
-    const removeRow = buildRemoveMenu(cfg);
-    return interaction.update({
-      embeds: [buildChannelsEmbed(cfg)],
-      components: removeRow ? [removeRow] : [],
-    });
-  }
-});
-
-// ── Error handling ────────────────────────────────────────────────────────────
-process.on('unhandledRejection', err => console.error('[UnhandledRejection]', err));
-process.on('uncaughtException',  err => console.error('[UncaughtException]',  err));
-client.on('error', err => console.error('[ClientError]', err));
-
-client.login(process.env.TOKEN);
+main();
