@@ -32,6 +32,24 @@ const TYPE_META = {
   anime:  { label: 'Anime Icons',   emoji: '🎌', desc: 'PFP anime estetici'              },
 };
 
+// ── Subreddit per tipo ────────────────────────────────────────────────────────
+const SUBREDDITS = {
+  female: [
+    'PFP',
+    'egirls',
+    'DarkAestheticPFP',
+    'alternativegirls',
+    'GothStyle',
+  ],
+  male: [
+    'PFP',
+    'DarkAestheticPFP',
+    'streetwear',
+    'malefashion',
+    'Faces',
+  ],
+};
+
 // ── Slash Commands ────────────────────────────────────────────────────────────
 const slashCommands = [
   new SlashCommandBuilder()
@@ -178,29 +196,11 @@ class MemberPool {
   }
 }
 
-// ── Icon Pool (Pixabay + waifu.im + nekos.best) ───────────────────────────────
+// ── Icon Pool ─────────────────────────────────────────────────────────────────
 class IconPool {
   constructor() {
     this.queues  = { female: [], male: [], anime: [] };
     this.loading = { female: false, male: false, anime: false };
-
-    // Query Pixabay ottimizzate per aesthetic PFP
-    this.pixabayQueries = {
-      female: [
-        'aesthetic girl selfie',
-        'egirl dark aesthetic',
-        'girl mirror selfie streetwear',
-        'aesthetic woman portrait',
-        'dark aesthetic girl portrait',
-      ],
-      male: [
-        'aesthetic boy streetwear',
-        'hypebeast male outfit',
-        'drip male aesthetic',
-        'boy mirror selfie aesthetic',
-        'dark aesthetic male portrait',
-      ],
-    };
   }
 
   next(type) {
@@ -218,61 +218,72 @@ class IconPool {
       const urls = await this._fetchBatch(type);
       if (urls.length > 0) {
         this.queues[type] = shuffle(urls);
-        console.log(`[IconPool:${type}] Caricati ${urls.length} immagini`);
+        console.log(`[IconPool:${type}] ✅ Caricati ${urls.length} immagini`);
       } else {
-        console.warn(`[IconPool:${type}] Nessuna immagine caricata`);
+        console.warn(`[IconPool:${type}] ⚠️ Nessuna immagine caricata`);
       }
     } catch (err) {
-      console.error(`[IconPool:${type}] Errore preload:`, err.message);
+      console.error(`[IconPool:${type}] Errore:`, err.message);
     } finally { this.loading[type] = false; }
   }
 
   async _fetchBatch(type) {
-    // ── ANIME: waifu.im (femmine) + nekos.best (maschi) ──────────────────────
-    if (type === 'anime') {
-      const [females, males] = await Promise.all([
-        this._fetchWaifuIm(),
-        this._fetchNekos(),
-      ]);
-      return shuffle([...females, ...males]);
-    }
+    if (type === 'anime') return this._fetchAnime();
+    return this._fetchReddit(type);
+  }
 
-    // ── FEMALE / MALE: Pixabay ────────────────────────────────────────────────
-    const KEY = process.env.PIXABAY_KEY;
-    if (!KEY) {
-      console.error('[IconPool] PIXABAY_KEY mancante! Aggiungi la variabile su Railway.');
-      return [];
-    }
-
-    const queries = this.pixabayQueries[type];
+  async _fetchReddit(type) {
+    const subs    = SUBREDDITS[type];
     const allUrls = [];
 
-    for (const q of queries) {
+    for (const sub of subs) {
       try {
-        // Pagina random per più varietà ad ogni refresh
-        const page = Math.floor(Math.random() * 10) + 1;
-        const res  = await fetch(
-          `https://pixabay.com/api/?key=${KEY}` +
-          `&q=${encodeURIComponent(q)}` +
-          `&image_type=photo` +
-          `&orientation=vertical` +
-          `&per_page=50` +
-          `&page=${page}` +
-          `&safesearch=true`,
-          { headers: { 'User-Agent': 'pfp-bot/1.0' } }
-        );
-        const j = await res.json();
-        if (j.hits?.length) {
-          const urls = j.hits.map(h => h.largeImageURL ?? h.webformatURL).filter(Boolean);
-          allUrls.push(...urls);
+        // Alterna tra top/hot per varietà
+        const sort = ['top', 'hot'][Math.floor(Math.random() * 2)];
+        const time = ['month', 'week', 'all'][Math.floor(Math.random() * 3)];
+        const url  = `https://www.reddit.com/r/${sub}/${sort}.json?limit=100&t=${time}`;
+
+        const res = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; pfp-bot/2.0)',
+            'Accept': 'application/json',
+          },
+        });
+
+        if (!res.ok) {
+          console.warn(`[Reddit] r/${sub} → HTTP ${res.status}`);
+          continue;
         }
-        await sleep(300); // evita hammering API
+
+        const j = await res.json();
+        const posts = j?.data?.children ?? [];
+
+        const imgs = posts
+          .map(p => p.data)
+          .filter(d =>
+            d.post_hint === 'image' &&
+            !d.over_18 &&
+            (d.url?.endsWith('.jpg') || d.url?.endsWith('.jpeg') || d.url?.endsWith('.png'))
+          )
+          .map(d => d.url);
+
+        allUrls.push(...imgs);
+        console.log(`[Reddit] r/${sub} → ${imgs.length} immagini`);
+        await sleep(500); // gentile verso Reddit
       } catch (err) {
-        console.error(`[Pixabay:${type}] query "${q}":`, err.message);
+        console.error(`[Reddit] r/${sub}:`, err.message);
       }
     }
 
-    return [...new Set(allUrls)]; // dedup
+    return [...new Set(allUrls)];
+  }
+
+  async _fetchAnime() {
+    const [females, males] = await Promise.all([
+      this._fetchWaifuIm(),
+      this._fetchNekos(),
+    ]);
+    return shuffle([...females, ...males]);
   }
 
   async _fetchWaifuIm() {
@@ -282,7 +293,7 @@ class IconPool {
       try {
         const res = await fetch(
           `https://api.waifu.im/search/?included_tags=${tag}&height=%3E%3D500&limit=30`,
-          { headers: { 'User-Agent': 'pfp-bot/1.0' } }
+          { headers: { 'User-Agent': 'pfp-bot/2.0' } }
         );
         const j = await res.json();
         if (j.images) urls.push(...j.images.map(i => i.url));
@@ -298,7 +309,7 @@ class IconPool {
       try {
         const res = await fetch(
           `https://nekos.best/api/v2/${ep}?amount=20`,
-          { headers: { 'User-Agent': 'pfp-bot/1.0' } }
+          { headers: { 'User-Agent': 'pfp-bot/2.0' } }
         );
         const j = await res.json();
         if (j.results) urls.push(...j.results.map(r => r.url));
@@ -313,7 +324,6 @@ const memberPool = new MemberPool();
 const iconPool   = new IconPool();
 
 function startTasks(guild) {
-  // INTERACT – utenti del server
   setInterval(async () => {
     const ch = getChannel(loadConfig().channels.pfp);
     if (!ch) return;
@@ -338,12 +348,10 @@ function startTasks(guild) {
     await safeSend(ch, { embeds: [makeEmbed(item.url, `User ID: ${item.id} | Today at ${ts()}`)] });
   }, 12000);
 
-  // ICONS – sorgenti esterne
   for (const type of ['female', 'male', 'anime']) {
     setInterval(async () => {
       const ch = getChannel(loadConfig().channels[type]);
       if (!ch) return;
-      // Ricarica batch se quasi vuoto
       if (iconPool.queues[type].length < 10) {
         iconPool.preload(type).catch(console.error);
       }
@@ -356,11 +364,11 @@ function startTasks(guild) {
   memberPool.refresh(guild);
   setInterval(() => memberPool.refresh(guild), 10 * 60 * 1000);
 
-  // Refresh batch icon ogni 2 ore per varietà fresca
+  // Refresh batch icon ogni 2 ore
   setInterval(async () => {
     for (const type of ['female', 'male', 'anime']) {
       iconPool.queues[type] = [];
-      await iconPool.preload(type);
+      iconPool.preload(type).catch(console.error);
     }
   }, 2 * 60 * 60 * 1000);
 }
@@ -394,17 +402,13 @@ client.on('interactionCreate', async interaction => {
     cfg.channels[tipo] = canale.id;
     saveConfig(cfg);
     return interaction.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x57f287)
-          .setTitle('✅  Canale aggiornato')
-          .addFields(
-            { name: 'Tipo',   value: `${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}`, inline: true },
-            { name: 'Canale', value: `<#${canale.id}>`, inline: true },
-          )
-          .setFooter({ text: prev ? `Sostituisce: <#${prev}>` : 'Nessun canale precedente' })
-          .setTimestamp(),
-      ],
+      embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('✅  Canale aggiornato')
+        .addFields(
+          { name: 'Tipo',   value: `${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}`, inline: true },
+          { name: 'Canale', value: `<#${canale.id}>`, inline: true },
+        )
+        .setFooter({ text: prev ? `Sostituisce: <#${prev}>` : 'Nessun canale precedente' })
+        .setTimestamp()],
       ephemeral: true,
     });
   }
@@ -423,12 +427,8 @@ client.on('interactionCreate', async interaction => {
     const tipo = interaction.values[0];
     pendingRemovals.set(interaction.message.id, tipo);
     return interaction.update({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xed4245)
-          .setTitle('⚠️  Conferma rimozione')
-          .setDescription(`Stai per rimuovere il canale per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}**.\n\nSei sicuro?`),
-      ],
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('⚠️  Conferma rimozione')
+        .setDescription(`Stai per rimuovere il canale per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}**.\n\nSei sicuro?`)],
       components: [buildConfirmRow()],
     });
   }
