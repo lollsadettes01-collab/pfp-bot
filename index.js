@@ -58,8 +58,8 @@ const slashCommands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(c => c.toJSON());
 
-// ── Pending state (per le interazioni a catena) ───────────────────────────────
-const pendingRemovals = new Map(); // messageId → tipo selezionato
+// ── Pending state ─────────────────────────────────────────────────────────────
+const pendingRemovals = new Map();
 
 // ── Embed helper: pannello canali ─────────────────────────────────────────────
 function buildChannelsEmbed(cfg) {
@@ -87,39 +87,25 @@ function buildChannelsEmbed(cfg) {
     .setTimestamp();
 }
 
-// ── Select menu per la rimozione ──────────────────────────────────────────────
 function buildRemoveMenu(cfg) {
   const configured = TYPES.filter(t => cfg.channels[t]);
   if (configured.length === 0) return null;
-
   const menu = new StringSelectMenuBuilder()
     .setCustomId('remove_select')
     .setPlaceholder('🗑️  Seleziona un canale da rimuovere...')
-    .addOptions(
-      configured.map(t => ({
-        label: TYPE_META[t].label,
-        description: TYPE_META[t].desc,
-        value: t,
-        emoji: TYPE_META[t].emoji,
-      }))
-    );
-
+    .addOptions(configured.map(t => ({
+      label: TYPE_META[t].label,
+      description: TYPE_META[t].desc,
+      value: t,
+      emoji: TYPE_META[t].emoji,
+    })));
   return new ActionRowBuilder().addComponents(menu);
 }
 
-// ── Bottoni di conferma ───────────────────────────────────────────────────────
 function buildConfirmRow() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('confirm_remove')
-      .setLabel('Rimuovi')
-      .setEmoji('🗑️')
-      .setStyle(ButtonStyle.Danger),
-    new ButtonBuilder()
-      .setCustomId('cancel_remove')
-      .setLabel('Annulla')
-      .setEmoji('↩️')
-      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('confirm_remove').setLabel('Rimuovi').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('cancel_remove').setLabel('Annulla').setEmoji('↩️').setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -222,6 +208,7 @@ class IconPool {
   constructor() {
     this.seen = { female: new Set(), male: new Set(), anime: new Set() };
   }
+
   async fetch(type) {
     let url, attempts = 0;
     do {
@@ -235,22 +222,41 @@ class IconPool {
     }
     return url;
   }
+
   async _raw(type) {
-    if (type === 'female' || type === 'male') {
-      const res = await fetch(`https://randomuser.me/api/?gender=${type}&inc=picture&noinfo&results=1`);
+    // ── ANIME: mix maschi e femmine ──────────────────────────────────────────
+    if (type === 'anime') {
+      const endpoints = [
+        // Femmine
+        'https://nekos.best/api/v2/waifu',
+        'https://nekos.best/api/v2/neko',
+        'https://nekos.best/api/v2/kitsune',
+        // Maschi
+        'https://nekos.best/api/v2/husbando',
+      ];
+      const ep  = endpoints[Math.floor(Math.random() * endpoints.length)];
+      const res = await fetch(ep, { headers: { 'User-Agent': 'pfp-bot/1.0' } });
       const j   = await res.json();
-      return j.results[0].picture.large;
+      return j.results[0].url;
     }
-    const endpoints = [
-      'https://api.waifu.pics/sfw/waifu',
-      'https://api.waifu.pics/sfw/neko',
-      'https://api.waifu.pics/sfw/shinobu',
-      'https://api.waifu.pics/sfw/megumin',
-    ];
-    const ep  = endpoints[Math.floor(Math.random() * endpoints.length)];
-    const res = await fetch(ep);
-    const j   = await res.json();
-    return j.url;
+
+    // ── FEMALE & MALE: Reddit PFP estetiche ──────────────────────────────────
+    const subs = {
+      female: ['VintagePFPs', 'PFP', 'DarkAestheticPFP', 'PFPart'],
+      male:   ['PFP', 'DarkAestheticPFP', 'PFPart', 'maleprofiles'],
+    };
+    const sub = subs[type][Math.floor(Math.random() * subs[type].length)];
+    const res = await fetch(
+      `https://www.reddit.com/r/${sub}/top.json?limit=100&t=month`,
+      { headers: { 'User-Agent': 'pfp-bot/1.0' } }
+    );
+    const j     = await res.json();
+    const posts = j?.data?.children?.filter(p =>
+      p.data.post_hint === 'image' && !p.data.over_18
+    ) ?? [];
+    if (!posts.length) throw new Error(`Nessuna immagine da r/${sub}`);
+    const post = posts[Math.floor(Math.random() * posts.length)];
+    return post.data.url;
   }
 }
 
@@ -318,7 +324,6 @@ client.once('ready', async () => {
 // ── Interaction handler ───────────────────────────────────────────────────────
 client.on('interactionCreate', async interaction => {
 
-  // ── /setchannel ──────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'setchannel') {
     const tipo   = interaction.options.getString('tipo');
     const canale = interaction.options.getChannel('canale');
@@ -326,7 +331,6 @@ client.on('interactionCreate', async interaction => {
     const prev   = cfg.channels[tipo];
     cfg.channels[tipo] = canale.id;
     saveConfig(cfg);
-
     const embed = new EmbedBuilder()
       .setColor(0x57f287)
       .setTitle('✅  Canale aggiornato')
@@ -336,60 +340,43 @@ client.on('interactionCreate', async interaction => {
       )
       .setFooter({ text: prev ? `Sostituisce: <#${prev}>` : 'Nessun canale precedente' })
       .setTimestamp();
-
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ── /channels ─────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'channels') {
-    const cfg        = loadConfig();
-    const embed      = buildChannelsEmbed(cfg);
-    const removeRow  = buildRemoveMenu(cfg);
-    const components = removeRow ? [removeRow] : [];
-    return interaction.reply({ embeds: [embed], components, ephemeral: true });
+    const cfg       = loadConfig();
+    const embed     = buildChannelsEmbed(cfg);
+    const removeRow = buildRemoveMenu(cfg);
+    return interaction.reply({ embeds: [embed], components: removeRow ? [removeRow] : [], ephemeral: true });
   }
 
-  // ── Select menu: scegli tipo da rimuovere ─────────────────────────────────
   if (interaction.isStringSelectMenu() && interaction.customId === 'remove_select') {
     const tipo = interaction.values[0];
     pendingRemovals.set(interaction.message.id, tipo);
-
     const embed = new EmbedBuilder()
       .setColor(0xed4245)
       .setTitle('⚠️  Conferma rimozione')
-      .setDescription(
-        `Stai per rimuovere il canale configurato per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}**.\n\nSei sicuro?`
-      );
-
+      .setDescription(`Stai per rimuovere il canale per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}**.\n\nSei sicuro?`);
     return interaction.update({ embeds: [embed], components: [buildConfirmRow()] });
   }
 
-  // ── Button: conferma rimozione ────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'confirm_remove') {
     const tipo = pendingRemovals.get(interaction.message.id);
     if (!tipo) return interaction.update({ content: '❌ Sessione scaduta.', embeds: [], components: [] });
-
     const cfg = loadConfig();
     delete cfg.channels[tipo];
     saveConfig(cfg);
     pendingRemovals.delete(interaction.message.id);
-
     const successEmbed = new EmbedBuilder()
       .setColor(0x57f287)
       .setTitle('🗑️  Rimosso con successo')
       .setDescription(`Il canale per **${TYPE_META[tipo].emoji} ${TYPE_META[tipo].label}** è stato rimosso.`);
-
     const newCfg    = loadConfig();
     const mainEmbed = buildChannelsEmbed(newCfg);
     const removeRow = buildRemoveMenu(newCfg);
-
-    return interaction.update({
-      embeds: [successEmbed, mainEmbed],
-      components: removeRow ? [removeRow] : [],
-    });
+    return interaction.update({ embeds: [successEmbed, mainEmbed], components: removeRow ? [removeRow] : [] });
   }
 
-  // ── Button: annulla rimozione (torna al pannello) ─────────────────────────
   if (interaction.isButton() && interaction.customId === 'cancel_remove') {
     pendingRemovals.delete(interaction.message.id);
     const cfg       = loadConfig();
