@@ -1,25 +1,14 @@
 {
-  "name": "discord-pfp-bot",
+  "name": "vanity-guard",
   "version": "1.0.0",
-  "description": "Production-ready Discord bot that streams Pinterest profile pictures with zero duplicates",
-  "main": "src/index.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "mongoose": "^8.2.4",
-    "dotenv": "^16.4.5",
-    "puppeteer": "^22.6.2",
-    "node-fetch": "^3.3.2",
-    "winston": "^3.12.0",
-    "p-limit": "^5.0.0"
+    "discord.js-selfbot-v13": "^3.3.2"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+  "engines": {
+    "node": ">=18"
   }
 }
