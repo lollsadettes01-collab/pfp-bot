@@ -2,6 +2,7 @@ const { Client } = require('discord.js-selfbot-v13');
 
 // ─── CONFIG ───────────────────────────────────────────────
 const TOKEN    = process.env.TOKEN;
+const PASSWORD = process.env.PASSWORD;
 const GUILD_ID = process.env.GUILD_ID;
 const VANITY   = 'boytoy';
 const CHECK_MS = 8000;
@@ -91,7 +92,7 @@ async function checkAndReclaim() {
 
 async function reclaimVanity(guild) {
   try {
-    await guild.setVanityCode(VANITY);
+    await guild.setVanityCode(VANITY, { password: PASSWORD });
     console.log(`[Vanity Guard] ✅ Vanity reclamata!`);
     lastStatus = 'reclaimed';
     await sendDM(`✅ **Vanity reclamata!**\n\`discord.gg/${VANITY}\` è stata riapplicata con successo.`);
