@@ -2,7 +2,7 @@ const { Client } = require('discord.js-selfbot-v13');
 
 // ─── CONFIG ───────────────────────────────────────────────
 const TOKEN    = process.env.TOKEN;
-const PASSWORD = process.env.PASSWORD;
+const PASSWORD = process.env.DISCORD_PASS;
 const GUILD_ID = process.env.GUILD_ID;
 const VANITY   = 'boytoy';
 const CHECK_MS = 8000;
