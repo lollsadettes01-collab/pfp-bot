@@ -1,6 +1,6 @@
 const { Client } = require('discord.js-selfbot-v13');
 const axios = require('axios');
-const CycleTLS = require('cycleTLS');
+const CycleTLS = require('cycletls');  // nome corretto (minuscolo)
 const fs = require('fs');
 const path = require('path');
 
@@ -77,7 +77,6 @@ function saveGraceData(data) {
 async function claimVanity(token, password, vanity, guildId) {
     log(`Tentativo claim per ${vanity}...`, "CLAIM");
     try {
-        // Step 1: Richiesta claim
         const claimResponse = await CycleTLS.post(`https://discord.com/api/v9/guilds/${guildId}/vanity-url`, {
             body: JSON.stringify({ code: vanity }),
             headers: {
@@ -91,15 +90,17 @@ async function claimVanity(token, password, vanity, guildId) {
             log(`Vanity ${vanity} reclamata con successo!`, "SUCCESS");
             await sendWebhook(`✅ **Vanity reclamata!** \`${vanity}\` è ora tua.`);
             return true;
-        } else if (claimResponse.status === 400 && claimResponse.body?.includes('mfa')) {
+        } else if (claimResponse.status === 400 && JSON.stringify(claimResponse.body).includes('mfa')) {
             log("Richiede MFA, tentativo bypass...", "MFA");
             if (await solveMFA(token, password)) {
                 return await claimVanity(token, password, vanity, guildId);
             }
         } else if (claimResponse.status === 429) {
-            log("Rate limit, attendo...", "WARNING");
+            log("Rate limit, attendo 5 secondi...", "WARNING");
             await new Promise(resolve => setTimeout(resolve, 5000));
             return await claimVanity(token, password, vanity, guildId);
+        } else {
+            log(`Claim fallito: status ${claimResponse.status}`, "WARNING");
         }
     } catch (err) {
         log(`Claim error: ${err.message}`, "ERROR");
@@ -114,6 +115,7 @@ async function monitorAndSnipe() {
     const client = new Client({ checkUpdate: false });
     await client.login(CONFIG.token_monitor);
     log(`Bot monitor avviato come ${client.user.tag}`);
+
     client.on('guildUpdate', async (oldGuild, newGuild) => {
         if (newGuild.id === CONFIG.target_guild_id) {
             const vanity = newGuild.vanityURLCode;
@@ -129,6 +131,8 @@ async function monitorAndSnipe() {
             }
         }
     });
+
+    // Controllo periodico del grace period
     setInterval(async () => {
         for (const [vanity, expiry] of Object.entries(graceData)) {
             if (Date.now() >= expiry) {
