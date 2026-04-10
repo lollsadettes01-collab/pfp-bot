@@ -1,117 +1,57 @@
-const { Client } = require('discord.js-selfbot-v13');
+const express = require('express');
+const axios = require('axios');
 
-// ─── CONFIG ───────────────────────────────────────────────
-const TOKEN    = process.env.TOKEN;
-const PASSWORD = process.env.DISCORD_PASS;
+// ========== LEGGI VARIABILI D'AMBIENTE ==========
+const TOKEN = process.env.TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
-const VANITY   = 'boytoy';
-const CHECK_MS = 8000;
-// ──────────────────────────────────────────────────────────
+const VANITY_URL = process.env.VANITY_URL;
 
-let client;
-let lastStatus = null;
-let isReclaiming = false;
-let guardInterval = null;
-
-function createClient() {
-  client = new Client({ checkUpdate: false });
-
-  client.on('ready', () => {
-    console.log(`[Vanity Guard] ✅ Loggato come ${client.user.tag}`);
-    console.log(`[Vanity Guard] Monitorando: discord.gg/${VANITY}`);
-    lastStatus = null;
-    isReclaiming = false;
-    startGuard();
-  });
-
-  client.on('disconnect', () => {
-    console.warn('[Vanity Guard] Disconnesso. Riconnessione in 5s...');
-    stopGuard();
-    setTimeout(reconnect, 5000);
-  });
-
-  client.on('error', (err) => {
-    console.error(`[Vanity Guard] Errore client: ${err.message}`);
-  });
-
-  process.on('unhandledRejection', (err) => {
-    console.error(`[Vanity Guard] UnhandledRejection: ${err?.message}`);
-  });
-
-  client.login(TOKEN).catch((err) => {
-    console.error(`[Vanity Guard] Login fallito: ${err.message}. Riprovo in 10s...`);
-    setTimeout(reconnect, 10000);
-  });
+if (!TOKEN || !GUILD_ID || !VANITY_URL) {
+  console.error('❌ ERRORE: Imposta le variabili d\'ambiente TOKEN, GUILD_ID e VANITY_URL su Railway');
+  process.exit(1);
 }
 
-function reconnect() {
-  console.log('[Vanity Guard] Tentativo di riconnessione...');
-  stopGuard();
-  try { client.destroy(); } catch (_) {}
-  createClient();
-}
+// ========== SERVER HTTP (keep-alive per Railway) ==========
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-function startGuard() {
-  stopGuard();
-  guardInterval = setInterval(async () => {
-    if (isReclaiming) return;
-    await checkAndReclaim();
-  }, CHECK_MS);
-}
+app.get('/', (req, res) => {
+  res.send('Discord Vanity Sniper is running!');
+});
 
-function stopGuard() {
-  if (guardInterval) {
-    clearInterval(guardInterval);
-    guardInterval = null;
-  }
-}
+app.listen(PORT, () => {
+  console.log(`✅ Server keep-alive attivo sulla porta ${PORT}`);
+});
 
-async function checkAndReclaim() {
+// ========== LOGICA SNIPER ==========
+async function snipeVanity() {
   try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const vanityData = await guild.fetchVanityData().catch(() => null);
-    const current = vanityData?.code?.toLowerCase() ?? null;
-
-    if (current === VANITY.toLowerCase()) {
-      if (lastStatus !== 'ok') {
-        console.log(`[Vanity Guard] ✅ Vanity attiva: discord.gg/${VANITY}`);
-        lastStatus = 'ok';
-      }
-      return;
+    const response = await axios.patch(
+      `https://discord.com/api/v9/guilds/${GUILD_ID}/vanity-url`,
+      { code: VANITY_URL },
+      { headers: { 'Authorization': TOKEN, 'Content-Type': 'application/json' } }
+    );
+    console.log(`🎯 VANITY CATTURATO! ${VANITY_URL} ->`, response.data);
+    process.exit(0);
+  } catch (error) {
+    if (error.response?.status === 429) {
+      const retryAfter = error.response.data.retry_after;
+      console.log(`⏳ Rate limit: aspetto ${retryAfter} secondi`);
+      await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+    } else if (error.response?.status === 400 && error.response?.data?.code === 50069) {
+      console.log(`❌ ${VANITY_URL} non ancora disponibile`);
+    } else {
+      console.error('⚠️ Errore:', error.response?.data || error.message);
     }
-
-    console.log(`[Vanity Guard] ⚠️ Vanity non corrisponde (attuale: ${current}). Reclamo...`);
-    isReclaiming = true;
-    await reclaimVanity(guild);
-
-  } catch (err) {
-    console.error(`[Vanity Guard] Errore check: ${err.message}`);
-    isReclaiming = false;
   }
 }
 
-async function reclaimVanity(guild) {
-  try {
-    await guild.setVanityCode(VANITY, { password: PASSWORD });
-    console.log(`[Vanity Guard] ✅ Vanity reclamata!`);
-    lastStatus = 'reclaimed';
-    await sendDM(`✅ **Vanity reclamata!**\n\`discord.gg/${VANITY}\` è stata riapplicata con successo.`);
-  } catch (err) {
-    console.warn(`[Vanity Guard] ⚠️ Reclamo fallito: ${err.message}. Riprovo al prossimo ciclo...`);
-  } finally {
-    isReclaiming = false;
+async function mainLoop() {
+  console.log(`🚀 Sniper avviato per "${VANITY_URL}" (guild ${GUILD_ID})`);
+  while (true) {
+    await snipeVanity();
+    await new Promise(resolve => setTimeout(resolve, 200)); // 200ms tra un tentativo e l'altro
   }
 }
 
-async function sendDM(message) {
-  try {
-    const me = await client.users.fetch(client.user.id);
-    const dm = await me.createDM();
-    await dm.send(message);
-    console.log(`[Vanity Guard] 📬 DM inviato.`);
-  } catch (err) {
-    console.error(`[Vanity Guard] DM fallito: ${err.message}`);
-  }
-}
-
-createClient();
+mainLoop();
