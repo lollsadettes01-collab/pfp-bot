@@ -1,20 +1,33 @@
 const axios = require('axios');
 const CycleTLS = require('cycletls');
-const fs = require('fs');
 
-// === Configurazione da variabili d'ambiente Railway ===
-const TOKEN = process.env.TOKEN_MONITOR;       // stesso token per monitor e snipe
+// === Configurazione da variabili d'ambiente ===
+const TOKEN_SNIPER = process.env.TOKEN_SNIPER;   // Usato per il claim
+const TOKEN_MONITOR = process.env.TOKEN_MONITOR; // Tenuto per compatibilità (non usato attivamente)
 const PASSWORD = process.env.PASSWORD;
 const GUILD_ID = process.env.TARGET_GUILD_ID;
 const VANITY = process.env.TARGET_VANITY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-// === Logging ===
+if (!TOKEN_SNIPER) {
+    console.error("[FATAL] TOKEN_SNIPER non impostato nelle variabili d'ambiente");
+    process.exit(1);
+}
+if (!PASSWORD) {
+    console.error("[FATAL] PASSWORD non impostata");
+    process.exit(1);
+}
+if (!GUILD_ID || !VANITY) {
+    console.error("[FATAL] TARGET_GUILD_ID o TARGET_VANITY non impostati");
+    process.exit(1);
+}
+
+let client = null;
+
 function log(message, type = 'INFO') {
     console.log(`[${new Date().toISOString()}] [${type}] ${message}`);
 }
 
-// === Webhook (opzionale) ===
 async function sendWebhook(message) {
     if (!WEBHOOK_URL) return;
     try {
@@ -25,21 +38,18 @@ async function sendWebhook(message) {
     }
 }
 
-// === MFA Bypass (Ninja Mode) ===
 async function solveMFA(token, password) {
     log("Tentativo MFA bypass...", "MFA");
+    if (!client) client = CycleTLS();
     try {
-        const response = await CycleTLS.post('https://discord.com/api/v9/mfa/finish', {
+        const response = await client.post('https://discord.com/api/v9/mfa/finish', {
             body: JSON.stringify({
                 password: password,
                 ticket: "mfa_ticket_placeholder",
                 gift_code_sku_id: null,
                 login_source: null
             }),
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': token
-            },
+            headers: { 'Content-Type': 'application/json', 'Authorization': token },
             ja3: '771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0',
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
         });
@@ -53,16 +63,13 @@ async function solveMFA(token, password) {
     return false;
 }
 
-// === Tentativo di claim (con gestione 429 e MFA) ===
 async function attemptClaim() {
     log(`Tentativo claim per ${VANITY}...`, "CLAIM");
+    if (!client) client = CycleTLS();
     try {
-        const response = await CycleTLS.post(`https://discord.com/api/v9/guilds/${GUILD_ID}/vanity-url`, {
+        const response = await client.post(`https://discord.com/api/v9/guilds/${GUILD_ID}/vanity-url`, {
             body: JSON.stringify({ code: VANITY }),
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': TOKEN
-            },
+            headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN_SNIPER },
             ja3: '771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0',
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
         });
@@ -70,24 +77,16 @@ async function attemptClaim() {
         if (response.status === 200) {
             log(`✅ Vanity ${VANITY} reclamata con successo!`, "SUCCESS");
             await sendWebhook(`✅ **Vanity reclamata!** \`${VANITY}\` è ora tua.`);
-            return true;  // uscita dal loop (opzionale)
-        } 
-        else if (response.status === 400 && JSON.stringify(response.body).includes('mfa')) {
+            return true;
+        } else if (response.status === 400 && JSON.stringify(response.body).includes('mfa')) {
             log("Richiede MFA, tentativo bypass...", "MFA");
-            if (await solveMFA(TOKEN, PASSWORD)) {
-                // riprova subito dopo il bypass
-                return await attemptClaim();
-            }
-        } 
-        else if (response.status === 429) {
+            if (await solveMFA(TOKEN_SNIPER, PASSWORD)) return await attemptClaim();
+        } else if (response.status === 429) {
             const retryAfter = response.headers['retry-after'] || 5;
             log(`Rate limit! Attendo ${retryAfter} secondi...`, "WARNING");
             await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-            // non uscire, il loop esterno riproverà
-        } 
-        else {
-            // Altri errori (es. vanity già occupata, permessi, ecc.)
-            log(`Claim fallito: status ${response.status} - ${JSON.stringify(response.body)}`, "WARNING");
+        } else {
+            log(`Claim fallito: status ${response.status}`, "WARNING");
         }
     } catch (err) {
         log(`Errore di rete: ${err.message}`, "ERROR");
@@ -95,24 +94,24 @@ async function attemptClaim() {
     return false;
 }
 
-// === Loop principale: prova ogni 3 secondi ===
 async function startSniper() {
     log(`Avvio sniper per vanity "${VANITY}" sul server ${GUILD_ID}`, "START");
+    log(`TOKEN_SNIPER configurato, TOKEN_MONITOR presente: ${TOKEN_MONITOR ? 'sì' : 'no'}`, "INFO");
     log("Tenterò il claim ogni 3 secondi (gestione automatica di rate limit e MFA)", "INFO");
 
     while (true) {
         const success = await attemptClaim();
         if (success) {
-            log("Sniper completato con successo. Termino il processo.", "SUCCESS");
-            process.exit(0);  // esce dopo aver reclamato
+            log("Sniper completato. Termino.", "SUCCESS");
+            if (client) await client.close();
+            process.exit(0);
         }
-        // aspetta 3 secondi prima del prossimo tentativo
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
 }
 
-// === Avvio ===
-startSniper().catch(err => {
+startSniper().catch(async (err) => {
     log(`Errore fatale: ${err.message}`, "FATAL");
+    if (client) await client.close();
     process.exit(1);
 });
