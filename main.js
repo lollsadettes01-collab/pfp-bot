@@ -2,27 +2,26 @@ const axios = require('axios');
 const CycleTLS = require('cycletls');
 
 // === Configurazione da variabili d'ambiente ===
-const TOKEN_SNIPER = process.env.TOKEN_SNIPER;   // Usato per il claim
-const TOKEN_MONITOR = process.env.TOKEN_MONITOR; // Tenuto per compatibilità (non usato attivamente)
+const TOKEN_SNIPER = process.env.TOKEN_SNIPER;
+const TOKEN_MONITOR = process.env.TOKEN_MONITOR;
 const PASSWORD = process.env.PASSWORD;
 const GUILD_ID = process.env.TARGET_GUILD_ID;
 const VANITY = process.env.TARGET_VANITY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-if (!TOKEN_SNIPER) {
-    console.error("[FATAL] TOKEN_SNIPER non impostato nelle variabili d'ambiente");
-    process.exit(1);
-}
-if (!PASSWORD) {
-    console.error("[FATAL] PASSWORD non impostata");
-    process.exit(1);
-}
-if (!GUILD_ID || !VANITY) {
-    console.error("[FATAL] TARGET_GUILD_ID o TARGET_VANITY non impostati");
+if (!TOKEN_SNIPER || !PASSWORD || !GUILD_ID || !VANITY) {
+    console.error("[FATAL] Variabili mancanti: TOKEN_SNIPER, PASSWORD, TARGET_GUILD_ID, TARGET_VANITY");
     process.exit(1);
 }
 
-let client = null;
+let cycleClient = null;
+
+async function getCycleClient() {
+    if (!cycleClient) {
+        cycleClient = await CycleTLS(); // <-- AWAIT QUI!
+    }
+    return cycleClient;
+}
 
 function log(message, type = 'INFO') {
     console.log(`[${new Date().toISOString()}] [${type}] ${message}`);
@@ -40,7 +39,7 @@ async function sendWebhook(message) {
 
 async function solveMFA(token, password) {
     log("Tentativo MFA bypass...", "MFA");
-    if (!client) client = CycleTLS();
+    const client = await getCycleClient();
     try {
         const response = await client.post('https://discord.com/api/v9/mfa/finish', {
             body: JSON.stringify({
@@ -65,7 +64,7 @@ async function solveMFA(token, password) {
 
 async function attemptClaim() {
     log(`Tentativo claim per ${VANITY}...`, "CLAIM");
-    if (!client) client = CycleTLS();
+    const client = await getCycleClient();
     try {
         const response = await client.post(`https://discord.com/api/v9/guilds/${GUILD_ID}/vanity-url`, {
             body: JSON.stringify({ code: VANITY }),
@@ -86,7 +85,7 @@ async function attemptClaim() {
             log(`Rate limit! Attendo ${retryAfter} secondi...`, "WARNING");
             await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
         } else {
-            log(`Claim fallito: status ${response.status}`, "WARNING");
+            log(`Claim fallito: status ${response.status} - ${JSON.stringify(response.body)}`, "WARNING");
         }
     } catch (err) {
         log(`Errore di rete: ${err.message}`, "ERROR");
@@ -103,7 +102,7 @@ async function startSniper() {
         const success = await attemptClaim();
         if (success) {
             log("Sniper completato. Termino.", "SUCCESS");
-            if (client) await client.close();
+            if (cycleClient) await cycleClient.close();
             process.exit(0);
         }
         await new Promise(resolve => setTimeout(resolve, 3000));
@@ -112,6 +111,6 @@ async function startSniper() {
 
 startSniper().catch(async (err) => {
     log(`Errore fatale: ${err.message}`, "FATAL");
-    if (client) await client.close();
+    if (cycleClient) await cycleClient.close();
     process.exit(1);
 });
