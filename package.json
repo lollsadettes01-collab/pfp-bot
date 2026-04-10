@@ -1,0 +1,19 @@
+{
+  "name": "discord-vanity-sniper",
+  "version": "1.0.0",
+  "description": "Vanity Sniper for Railway",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "discord.js-selfbot-v13": "^3.0.1",
+    "cycleTLS": "^1.2.0",
+    "https-proxy-agent": "^7.0.0",
+    "ws": "^8.14.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
