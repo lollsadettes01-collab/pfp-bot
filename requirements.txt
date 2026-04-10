@@ -1,4 +1,0 @@
-curl_cffi>=0.5.10
-aiohttp
-asyncio
-keep_alive_ping
