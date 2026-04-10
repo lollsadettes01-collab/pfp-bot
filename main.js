@@ -1,7 +1,7 @@
 const axios = require('axios');
 const CycleTLS = require('cycletls');
 
-// === Configurazione ===
+// === Variabili d'ambiente (obbligatorie entrambe) ===
 const TOKEN_SNIPER = process.env.TOKEN_SNIPER;
 const TOKEN_MONITOR = process.env.TOKEN_MONITOR;
 const PASSWORD = process.env.PASSWORD;
@@ -9,17 +9,20 @@ const GUILD_ID = process.env.TARGET_GUILD_ID;
 const VANITY = process.env.TARGET_VANITY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
-if (!TOKEN_SNIPER || !PASSWORD || !GUILD_ID || !VANITY) {
-    console.error("[FATAL] Variabili mancanti: TOKEN_SNIPER, PASSWORD, TARGET_GUILD_ID, TARGET_VANITY");
+// Controllo rigoroso: entrambi i token devono essere presenti
+if (!TOKEN_SNIPER || !TOKEN_MONITOR) {
+    console.error("[FATAL] TOKEN_SNIPER e TOKEN_MONITOR devono essere entrambi impostati.");
+    process.exit(1);
+}
+if (!PASSWORD || !GUILD_ID || !VANITY) {
+    console.error("[FATAL] Variabili mancanti: PASSWORD, TARGET_GUILD_ID, TARGET_VANITY");
     process.exit(1);
 }
 
 let cycleClient = null;
 
 async function getCycleClient() {
-    if (!cycleClient) {
-        cycleClient = await CycleTLS();
-    }
+    if (!cycleClient) cycleClient = await CycleTLS();
     return cycleClient;
 }
 
@@ -31,9 +34,9 @@ async function sendWebhook(message) {
     if (!WEBHOOK_URL) return;
     try {
         await axios.post(WEBHOOK_URL, { content: message });
-        log(`Webhook inviato`, 'WEBHOOK');
+        log("Webhook inviato", "WEBHOOK");
     } catch (err) {
-        log(`Webhook fallito: ${err.message}`, 'ERROR');
+        log(`Webhook fallito: ${err.message}`, "ERROR");
     }
 }
 
@@ -66,10 +69,13 @@ async function attemptClaim() {
     log(`Tentativo claim per ${VANITY}...`, "CLAIM");
     const client = await getCycleClient();
     try {
-        // Usiamo PATCH, non POST
+        // Metodo PATCH (selfbot)
         const response = await client.patch(`https://discord.com/api/v9/guilds/${GUILD_ID}/vanity-url`, {
             body: JSON.stringify({ code: VANITY }),
-            headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN_SNIPER },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': TOKEN_SNIPER
+            },
             ja3: '771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0',
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
         });
@@ -81,20 +87,20 @@ async function attemptClaim() {
             log(`✅ Vanity ${VANITY} reclamata con successo!`, "SUCCESS");
             await sendWebhook(`✅ **Vanity reclamata!** \`${VANITY}\` è ora tua.`);
             return true;
-        } 
+        }
         else if (status === 204) {
-            log(`ℹ️ La vanity ${VANITY} è già impostata su questo server. Nessuna azione necessaria.`, "INFO");
-            return true; // Termina con successo
+            log(`ℹ️ La vanity ${VANITY} è già impostata su questo server. Nessuna azione.`, "INFO");
+            return true;
         }
         else if (status === 400) {
-            const errorMsg = body?.message || "Errore sconosciuto";
-            if (errorMsg.includes("already taken") || errorMsg.includes("invite")) {
+            const msg = body?.message || "";
+            if (msg.includes("already taken")) {
                 log(`❌ Vanity ${VANITY} già occupata da un altro server. Attendo rilascio...`, "WARNING");
-            } else if (errorMsg.includes("invalid")) {
+            } else if (msg.includes("invalid")) {
                 log(`❌ Nome vanity non valido.`, "ERROR");
-                return true; // Termina perché non recuperabile
+                return true;
             } else {
-                log(`⚠️ Errore 400: ${errorMsg}`, "WARNING");
+                log(`⚠️ Errore 400: ${msg}`, "WARNING");
             }
         }
         else if (status === 429) {
@@ -104,10 +110,7 @@ async function attemptClaim() {
         }
         else if (status === 401 || status === 403) {
             log(`❌ Token non autorizzato o permessi insufficienti.`, "ERROR");
-            return true; // Termina
-        }
-        else if (status === 405) {
-            log(`❌ Metodo non consentito. Verifica l'endpoint.`, "ERROR");
+            log("L'account deve avere il permesso 'Manage Guild'.", "ERROR");
             return true;
         }
         else {
@@ -121,8 +124,8 @@ async function attemptClaim() {
 
 async function startSniper() {
     log(`Avvio sniper per vanity "${VANITY}" sul server ${GUILD_ID}`, "START");
-    log(`TOKEN_SNIPER configurato, TOKEN_MONITOR presente: ${TOKEN_MONITOR ? 'sì' : 'no'}`, "INFO");
-    log("Tenterò il claim ogni 3 secondi (gestione automatica di rate limit e MFA)", "INFO");
+    log(`TOKEN_SNIPER e TOKEN_MONITOR sono entrambi impostati.`, "INFO");
+    log("Metodo: PATCH (selfbot). Tentativo ogni 3 secondi.", "INFO");
 
     while (true) {
         const success = await attemptClaim();
