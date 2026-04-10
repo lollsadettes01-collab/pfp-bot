@@ -1,10 +1,9 @@
 const { Client } = require('discord.js-selfbot-v13');
 const axios = require('axios');
-const CycleTLS = require('cycletls');  // nome corretto (minuscolo)
+const CycleTLS = require('cycletls');
 const fs = require('fs');
-const path = require('path');
 
-// --- Configurazione ---
+// --- Configurazione da variabili d'ambiente Railway ---
 const CONFIG = {
     token_monitor: process.env.TOKEN_MONITOR,
     token_sniper: process.env.TOKEN_SNIPER,
@@ -16,13 +15,12 @@ const CONFIG = {
     grace_file: 'grace_data.json'
 };
 
-// --- Logging Utility ---
+// --- Logging con timestamp ---
 function log(message, type = 'INFO') {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [${type}] ${message}`);
+    console.log(`[${new Date().toISOString()}] [${type}] ${message}`);
 }
 
-// --- Webhook Notification ---
+// --- Webhook (opzionale) ---
 async function sendWebhook(message) {
     if (!CONFIG.webhook_url) return;
     try {
@@ -61,7 +59,7 @@ async function solveMFA(token, password) {
     return false;
 }
 
-// --- Grace Period Management ---
+// --- Grace Period (salvataggio su file persistente) ---
 function loadGraceData() {
     if (fs.existsSync(CONFIG.grace_file)) {
         return JSON.parse(fs.readFileSync(CONFIG.grace_file));
@@ -73,7 +71,7 @@ function saveGraceData(data) {
     fs.writeFileSync(CONFIG.grace_file, JSON.stringify(data, null, 2));
 }
 
-// --- Vanity Claim Attempt ---
+// --- Tentativo di claim del vanity ---
 async function claimVanity(token, password, vanity, guildId) {
     log(`Tentativo claim per ${vanity}...`, "CLAIM");
     try {
@@ -108,7 +106,7 @@ async function claimVanity(token, password, vanity, guildId) {
     return false;
 }
 
-// --- Monitoraggio e Loop Principale ---
+// --- Monitoraggio e loop principale ---
 async function monitorAndSnipe() {
     log("Avvio monitoraggio...", "START");
     const graceData = loadGraceData();
@@ -132,7 +130,6 @@ async function monitorAndSnipe() {
         }
     });
 
-    // Controllo periodico del grace period
     setInterval(async () => {
         for (const [vanity, expiry] of Object.entries(graceData)) {
             if (Date.now() >= expiry) {
@@ -146,7 +143,7 @@ async function monitorAndSnipe() {
     }, 60000);
 }
 
-// --- Avvio ---
+// --- Avvio dello script ---
 monitorAndSnipe().catch(err => {
     log(`Errore fatale: ${err.message}`, "FATAL");
     process.exit(1);
